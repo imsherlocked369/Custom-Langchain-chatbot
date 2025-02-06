@@ -1,0 +1,100 @@
+import os
+from flask import Flask, request, jsonify
+from dotenv import load_dotenv
+
+# Loading environment variables from a .env file in the project directory.
+load_dotenv()  # Reads the .env file and sets environment variables.
+
+# Retrieving the Hugging Face API token from the environment.
+hf_api_token = os.environ.get("HUGGINGFACEHUB_API_TOKEN")
+if hf_api_token is None:
+    raise ValueError("Please set the HUGGINGFACEHUB_API_TOKEN in your .env file.")
+
+# Using the updated community imports to avoid deprecation warnings.
+from langchain_community.document_loaders import UnstructuredURLLoader
+from langchain_community.vectorstores import FAISS
+from langchain.chains.question_answering import load_qa_chain
+from langchain_community.llms import HuggingFaceHub
+
+# Importing SentenceTransformer to compute embeddings locally.
+from sentence_transformers import SentenceTransformer
+
+# Custom Embeddings Class using SentenceTransformer 
+
+class SentenceTransformerEmbeddings:
+    def __init__(self, model_name: str):
+        # Initialize the local sentence transformer model.
+        self.model = SentenceTransformer(model_name)
+        
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        # Encode the list of texts and return the embeddings as lists of floats.
+        return self.model.encode(texts).tolist()
+
+# Document Loading and Vector Store Creation Functions
+
+def load_documents():
+    """
+    Extracts documents from the technical courses page.
+    """
+    url = "https://brainlox.com/courses/category/technical"
+    loader = UnstructuredURLLoader(urls=[url])
+    documents = loader.load()
+    return documents
+
+def create_vector_store(documents):
+    """
+    Generates embeddings for the documents using a local SentenceTransformer model
+    and builds a FAISS vector store.
+    """
+    # Use a free/open-source sentence transformer model locally.
+    embeddings = SentenceTransformerEmbeddings("sentence-transformers/all-MiniLM-L6-v2")
+    vector_store = FAISS.from_documents(documents, embeddings)
+    return vector_store
+
+
+print("Loading documents from website...")
+documents = load_documents()
+print(f"Loaded {len(documents)} documents.")
+
+print("Creating vector store with embeddings...")
+vector_store = create_vector_store(documents)
+print("Vector store created successfully.")
+
+
+# Initializing the Language Model and QA Chain using Hugging Face.
+
+llm = HuggingFaceHub(
+    repo_id="bigscience/bloom",
+    huggingfacehub_api_token=hf_api_token,
+    model_kwargs={"temperature": 0.0}
+)
+qa_chain = load_qa_chain(llm, chain_type="stuff")
+
+
+# Creating and configuring the Flask RESTful API.
+
+app = Flask(__name__)
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    """
+    API endpoint that accepts a JSON payload with a 'query' field.
+    It retrieves similar documents from the vector store and generates an answer.
+    """
+    try:
+        data = request.get_json()
+        user_query = data.get("query", "")
+        if not user_query:
+            return jsonify({"error": "No query provided"}), 400
+
+        # Retrieving relevant documents based on the user query.
+        docs = vector_store.similarity_search(user_query)
+        # Generating the answer using the QA chain.
+        answer = qa_chain.run(input_documents=docs, question=user_query)
+        return jsonify({"response": answer})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    # Running the Flask app 
+    app.run(debug=True)
